@@ -5,5 +5,5 @@ numpy>=1.24.0
 einops>=0.7.0
 timm>=0.9.12
 torchmetrics>=1.2.1
-torchio>=3.3.0
+torchio>=0.20.0
 pytorch-lightning>=2.1.0 
