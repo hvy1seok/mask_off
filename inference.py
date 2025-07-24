@@ -11,6 +11,8 @@ import torch.nn.functional as F
 from einops import rearrange
 import torchio as tio
 import re
+import pickle
+import io
 
 # 경로 설정
 INPUT_PATH = Path("/input")
@@ -18,12 +20,63 @@ OUTPUT_PATH = Path("/output")
 MODEL_PATH = Path("/opt/ml/model")
 TEMP_PATH = Path("/tmp")  # 임시 파일 저장 경로
 
+class SafeUnpickler(pickle.Unpickler):
+    """체크포인트 로딩 시 모듈 경로 문제를 해결하는 안전한 언피클러"""
+    def find_class(self, module, name):
+        # odelia 모듈 참조를 현재 모듈로 리다이렉트
+        if module.startswith('odelia.'):
+            # odelia 모듈 참조를 무시하고 기본 클래스 사용
+            if name in ['MST', '_MST', 'BasicRegression']:
+                return getattr(__import__('resources.odelia.models.mst', fromlist=[name]), name)
+        return super().find_class(module, name)
+
+def safe_torch_load(file_path, map_location=None):
+    """안전한 torch.load 함수"""
+    try:
+        # 먼저 weights_only로 시도
+        return torch.load(file_path, map_location=map_location, weights_only=True)
+    except:
+        try:
+            # 안전한 언피클링 사용
+            with open(file_path, 'rb') as f:
+                unpickler = SafeUnpickler(f)
+                checkpoint = unpickler.load()
+            return checkpoint
+        except:
+            # 마지막 수단: 일반 로딩
+            return torch.load(file_path, map_location=map_location)
+
+def load_model():
+    """모델과 가중치 로드"""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = MST(in_ch=1, out_ch=2, loss_kwargs={'class_labels_num': 2}).to(device)
+    
+    # 가중치 로드
+    weights_path = MODEL_PATH / "epoch=23-step=624.ckpt"
+    if not weights_path.exists():
+        raise FileNotFoundError(f"모델 가중치 파일을 찾을 수 없습니다: {weights_path}")
+        
+    # 안전한 체크포인트 로딩 (모듈 경로 문제 해결)
+    checkpoint = safe_torch_load(weights_path, map_location=device)
+    
+    # state_dict 키 정리 (Lightning 형식 대응)
+    state_dict = checkpoint.get('state_dict', checkpoint)
+    model_state_dict = {k.replace('model.', '').replace('mst.', ''): v for k, v in state_dict.items()}
+    
+    model.load_state_dict(model_state_dict, strict=False)
+    
+    model.eval()
+    return model, device
+
 def crop_breast_height(image, margin_top=10):
     """유방 높이에 맞게 이미지 크롭"""
     threshold = int(np.quantile(image.data.float(), 0.9))
     foreground = image.data > threshold
     fg_rows = foreground[0].sum(axis=(0, 2))
-    top = min(max(512-int(torch.argwhere(fg_rows).max()) - margin_top, 0), 256)
+    if torch.any(fg_rows):
+        top = min(max(512-int(torch.argwhere(fg_rows).max()) - margin_top, 0), 256)
+    else:
+        top = 0  # 안전한 기본값
     bottom = 256-top
     return tio.Crop((0,0, bottom, top, 0, 0))
 
@@ -62,19 +115,19 @@ def preprocess_to_unilateral(image_path, ref_img=None, side='both'):
     
     return results, ref_img
 
-def compute_subtraction(prev_img_sitk, curr_img_sitk):
-    """Subtraction 이미지 계산 (sequential 방식: 현재 - 이전)"""
+def compute_subtraction(pre_img_sitk, post_img_sitk):
+    """Subtraction 이미지 계산 (baseline 방식: Post - Pre)"""
     # numpy 배열로 변환
-    prev = sitk.GetArrayFromImage(prev_img_sitk)
-    curr = sitk.GetArrayFromImage(curr_img_sitk)
+    pre = sitk.GetArrayFromImage(pre_img_sitk)
+    post = sitk.GetArrayFromImage(post_img_sitk)
     
     # subtraction 계산 (int16 유지)
-    sub = curr - prev
+    sub = post - pre
     sub = sub.astype(np.int16)
     
     # SITK 이미지로 변환
     sub_nii = sitk.GetImageFromArray(sub)
-    sub_nii.CopyInformation(prev_img_sitk)  # 원본 이미지의 메타데이터 복사
+    sub_nii.CopyInformation(pre_img_sitk)  # 원본 이미지의 메타데이터 복사
     
     return sub_nii
 
@@ -94,27 +147,6 @@ def preprocess_image(image_array):
 
 # 우리의 MST 모델 코드 import
 from resources.odelia.models.mst import MST
-
-def load_model():
-    """모델과 가중치 로드"""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = MST(in_ch=1, out_ch=2, loss_kwargs={'class_labels_num': 2}).to(device)
-    
-    # 가중치 로드
-    weights_path = MODEL_PATH / "epoch=23-step=624.ckpt"
-    if not weights_path.exists():
-        raise FileNotFoundError(f"모델 가중치 파일을 찾을 수 없습니다: {weights_path}")
-        
-    checkpoint = torch.load(weights_path, map_location=device)
-    
-    # state_dict 키 정리 (Lightning 형식 대응)
-    state_dict = checkpoint.get('state_dict', checkpoint)
-    model_state_dict = {k.replace('model.', '').replace('mst.', ''): v for k, v in state_dict.items()}
-    
-    model.load_state_dict(model_state_dict)
-    
-    model.eval()
-    return model, device
 
 def run():
     """메인 추론 함수"""
@@ -145,7 +177,10 @@ def run():
                     except StopIteration:
                         print(f"Warning: No .mha file found in {path}")
             
-            t2_mha_file = next((INPUT_PATH / "images/t2-breast-mri").glob("*.mha"))
+            try:
+                t2_mha_file = next((INPUT_PATH / "images/t2-breast-mri").glob("*.mha"))
+            except StopIteration:
+                raise FileNotFoundError("t2-breast-mri not found")
 
             # --- 2. Process images and build input tensor ---
             final_input_tensors = []
@@ -165,25 +200,24 @@ def run():
             pre_tensor = preprocess_image(sitk.GetArrayFromImage(pre_images[side].as_sitk()))
             final_input_tensors.append(pre_tensor)
 
-            # Initialize previous image for sequential subtraction
-            prev_images_sitk = pre_images[side].as_sitk()
+            # Pre-contrast 이미지를 baseline으로 고정
+            pre_images_sitk = pre_images[side].as_sitk()
             
-            # Process Post-contrast images and create sequential subtractions
+            # Process Post-contrast images and create baseline subtractions (Post_i - Pre)
             for timepoint in sorted(all_dce_paths.keys()):
                 if timepoint == 0:
                     continue # Skip pre-contrast as it's already processed
 
                 post_contrast_path = all_dce_paths[timepoint]
                 
+                # 현재 post-contrast 이미지를 불러와서 baseline(pre-contrast)으로 subtraction
                 curr_images, _ = preprocess_to_unilateral(post_contrast_path, ref_img=ref_img, side=side)
                 curr_images_sitk = curr_images[side].as_sitk()
                 
-                sub_sitk = compute_subtraction(prev_images_sitk, curr_images_sitk)
+                sub_sitk = compute_subtraction(pre_images_sitk, curr_images_sitk)
                 
                 sub_tensor = preprocess_image(sitk.GetArrayFromImage(sub_sitk))
                 final_input_tensors.append(sub_tensor)
-                
-                prev_images_sitk = curr_images_sitk
 
             # --- 3. Final batch creation and inference ---
             dce_tensor = torch.stack(final_input_tensors, dim=0)
@@ -204,6 +238,7 @@ def run():
                 ], dim=1)
                 probs = cumulative_probs[:, :-1] - cumulative_probs[:, 1:]
                 probs = F.softmax(probs, dim=1)  # 확률 정규화
+                probs = torch.clamp(probs, min=0.0, max=1.0)  # 안전장치: 0-1 범위로 제한
                 
                 # 각 클래스의 확률
                 bilateral_results[side] = {
