@@ -1,1 +1,1 @@
-# This file can be empty 
+# This file makes models a Python package 

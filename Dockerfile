@@ -1,6 +1,7 @@
 FROM --platform=linux/amd64 pytorch/pytorch:2.1.2-cuda12.1-cudnn8-runtime
 
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/opt/app
 
 # 비루트 user 생성
 RUN groupadd -r user && useradd -m --no-log-init -r -g user user
