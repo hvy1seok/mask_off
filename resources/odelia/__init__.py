@@ -1,2 +1,1 @@
-from . import data
-from . import models 
+# This file can be empty 
