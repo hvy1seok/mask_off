@@ -125,7 +125,7 @@ def run():
     TEMP_PATH.mkdir(exist_ok=True)
     
     # 입력 데이터 로드
-    inputs = load_json_file(INPUT_PATH / "inputs.json")
+    # inputs = load_json_file(INPUT_PATH / "inputs.json")
     
     # 좌우 유방별 예측 결과 저장
     bilateral_results = {"left": {}, "right": {}}
