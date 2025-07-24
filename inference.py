@@ -98,7 +98,7 @@ from resources.odelia.models.mst import MST
 def load_model():
     """모델과 가중치 로드"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = MST(in_ch=1, out_ch=2).to(device)
+    model = MST(in_ch=1, out_ch=2, loss_kwargs={'class_labels_num': 2}).to(device)
     
     # 가중치 로드
     weights_path = MODEL_PATH / "epoch=23-step=624.ckpt"
