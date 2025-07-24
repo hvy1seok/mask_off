@@ -64,14 +64,24 @@ class _MST(nn.Module):
         self.backbone_type = backbone_type
         self.slice_fusion_type = slice_fusion_type
 
+        # DINOv2 모델 크기 약어를 전체 이름으로 매핑
+        dinov2_model_size_map = {
+            's': 'small',
+            'b': 'base',
+            'l': 'large',
+            'g': 'giant'
+        }
+
         if backbone_type == "resnet":
             Model = _get_resnet_torch(model_size)
             self.backbone = Model(weights="DEFAULT")
             emb_ch = self.backbone.fc.in_features
             self.backbone.fc = nn.Identity()
         elif backbone_type == "dinov2":
+            full_model_size = dinov2_model_size_map.get(model_size, model_size)
+            model_name = f'vit_{full_model_size}_patch14_dinov2'
             # torch.hub.load 대신 timm.create_model 사용 (오프라인 호환)
-            self.backbone = timm.create_model(f'vit_{model_size}_patch14_dinov2', pretrained=False)
+            self.backbone = timm.create_model(model_name, pretrained=False)
             self.backbone.mask_token = None
             emb_ch = self.backbone.embed_dim
         
