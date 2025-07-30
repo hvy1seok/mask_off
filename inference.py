@@ -23,7 +23,7 @@ MODEL_PATH = Path("/opt/ml/model")
 TEMP_PATH = Path("/tmp")  # 임시 파일 저장 경로
 
 def load_model():
-    """모델과 가중치 로드 (경로 문제 해결 포함)"""
+    """모델과 가중치 로드 (경로 및 압축 문제 해결 포함)"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # 1. /opt/ml/model/ 에서 .ckpt 파일을 동적으로 찾기
@@ -32,31 +32,42 @@ def load_model():
     except StopIteration:
         raise FileNotFoundError(f"모델 가중치 파일(.ckpt)을 찾을 수 없습니다: {MODEL_PATH}")
 
-    # 2. sys.modules를 임시로 패치하여 경로 문제 해결
-    #    'odelia.models'라는 과거 경로를 현재의 'resources.odelia.models'로 매핑
+    # 2. 체크포인트 로드 (압축 파일 가능성 처리)
+    try:
+        # 일반 파일로 로드 시도
+        checkpoint = torch.load(weights_path, map_location=device, weights_only=False)
+    except Exception as e:
+        # 오류 발생 시, gzip 압축 파일인지 확인하고 재시도
+        if "invalid load key" in str(e): # gzipped file signature
+            print("Warning: Checkpoint file appears to be compressed. Decompressing on the fly.")
+            import gzip
+            with gzip.open(weights_path, 'rb') as f:
+                checkpoint = torch.load(f, map_location=device, weights_only=False)
+        else:
+            # 다른 종류의 오류는 다시 발생시킴
+            raise e
+
+    # 3. sys.modules를 임시로 패치하여 경로 문제 해결
     sys.modules['odelia.models.mst'] = mst_module
     sys.modules['odelia.models.base_model'] = base_model_module
     
-    # 3. 체크포인트 로드 (weights_only=False로 전체 로드)
-    #    Lightning 체크포인트는 가중치 외에 하이퍼파라미터 등 중요 정보를 포함
-    checkpoint = torch.load(weights_path, map_location=device, weights_only=False)
-    
-    # 4. 임시 패치 정리
-    del sys.modules['odelia.models.mst']
-    del sys.modules['odelia.models.base_model']
+    # 4. 임시 패치 정리 (이 부분은 체크포인트 로드 후에 와야 함)
+    # 체크포인트 로드 자체는 클래스 정의가 필요 없지만, 하이퍼파라미터로 모델을 만들 때 필요.
+    # 하지만 클래스 객체는 이미 checkpoint에 unpickle되므로, 이 패치는 사실상 state_dict 로드 전에만 유효하면 됨.
+    # 순서를 유지하는 것이 안전함.
 
-    # 5. 체크포인트에서 하이퍼파라미터를 가져와 모델 재구성
     hyper_parameters = checkpoint['hyper_parameters']
     
-    # 오래된 체크포인트와의 호환성을 위해 loss_kwargs 추가
     if 'loss_kwargs' not in hyper_parameters:
         hyper_parameters['loss_kwargs'] = {'class_labels_num': 2}
         
     model = MST(**hyper_parameters)
+
+    # 이제 패치를 정리해도 안전
+    del sys.modules['odelia.models.mst']
+    del sys.modules['odelia.models.base_model']
     
-    # 6. 모델 가중치(state_dict) 로드
     state_dict = checkpoint['state_dict']
-    # 'model.' 접두사 제거 (Lightning -> 일반 PyTorch)
     state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
     model.load_state_dict(state_dict, strict=True)
     
