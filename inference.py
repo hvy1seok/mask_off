@@ -14,7 +14,9 @@ import re
 import sys
 from resources.odelia.models.mst import MST
 import resources.odelia.models.mst as mst_module
+# 모델 모듈 레퍼런스
 import resources.odelia.models.base_model as base_model_module
+import resources.odelia.models.utils as utils_module
 # 표준 라이브러리
 import tarfile
 import gzip
@@ -59,10 +61,12 @@ def load_model():
     # (3) 실제 모듈 매핑
     sys.modules['odelia.models.mst'] = mst_module
     sys.modules['odelia.models.base_model'] = base_model_module
+    sys.modules['odelia.models.utils'] = utils_module
 
     # (4) 서브패키지 속성으로도 연결(언피클 시 getattr 사용 가능하도록)
     odelia_models_pkg.mst = mst_module
     odelia_models_pkg.base_model = base_model_module
+    odelia_models_pkg.utils = utils_module
     odelia_pkg.models = odelia_models_pkg
     
     checkpoint = None
