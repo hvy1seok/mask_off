@@ -15,10 +15,12 @@ import sys
 from resources.odelia.models.mst import MST
 import resources.odelia.models.mst as mst_module
 import resources.odelia.models.base_model as base_model_module
+# 표준 라이브러리
 import tarfile
 import gzip
 import io
 import pickle
+import types
 
 # 경로 설정
 INPUT_PATH = Path("/input")
@@ -36,10 +38,33 @@ def load_model():
     except StopIteration:
         raise FileNotFoundError(f"모델 가중치 파일을 찾을 수 없습니다: {MODEL_PATH}")
 
-    # 2. sys.modules 패치 (로드 전에 한 번만 수행)
+    # 2. sys.modules 패치 (체크포인트 unpickle 중 모듈 경로 문제 대응)
+    #   1) 최상위 "odelia" 패키지, 2) "odelia.models" 서브패키지를 가짜 모듈로 등록하고
+    #   3) 실제 구현이 있는 mst/base_model 모듈은 기존 resources 경로로 매핑합니다.
+
+    # (1) 최상위 패키지
+    if 'odelia' not in sys.modules:
+        odelia_pkg = types.ModuleType('odelia')
+        sys.modules['odelia'] = odelia_pkg
+    else:
+        odelia_pkg = sys.modules['odelia']
+
+    # (2) 서브패키지 "odelia.models"
+    if 'odelia.models' not in sys.modules:
+        odelia_models_pkg = types.ModuleType('odelia.models')
+        sys.modules['odelia.models'] = odelia_models_pkg
+    else:
+        odelia_models_pkg = sys.modules['odelia.models']
+
+    # (3) 실제 모듈 매핑
     sys.modules['odelia.models.mst'] = mst_module
     sys.modules['odelia.models.base_model'] = base_model_module
 
+    # (4) 서브패키지 속성으로도 연결(언피클 시 getattr 사용 가능하도록)
+    odelia_models_pkg.mst = mst_module
+    odelia_models_pkg.base_model = base_model_module
+    odelia_pkg.models = odelia_models_pkg
+    
     checkpoint = None
     
     # 3. 파일 타입에 따라 체크포인트 로드 (순차적 시도)
