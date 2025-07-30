@@ -15,6 +15,8 @@ import sys
 from resources.odelia.models.mst import MST
 import resources.odelia.models.mst as mst_module
 import resources.odelia.models.base_model as base_model_module
+import tarfile
+import gzip
 
 # 경로 설정
 INPUT_PATH = Path("/input")
@@ -23,49 +25,64 @@ MODEL_PATH = Path("/opt/ml/model")
 TEMP_PATH = Path("/tmp")  # 임시 파일 저장 경로
 
 def load_model():
-    """모델과 가중치 로드 (경로 및 압축 문제 해결 포함)"""
+    """모델과 가중치 로드 (경로, 압축, tar 아카이브 문제 해결 포함)"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # 1. /opt/ml/model/ 에서 .ckpt 파일을 동적으로 찾기
     try:
         weights_path = next(MODEL_PATH.glob("*.ckpt"))
     except StopIteration:
-        raise FileNotFoundError(f"모델 가중치 파일(.ckpt)을 찾을 수 없습니다: {MODEL_PATH}")
+        # .ckpt가 없으면 .tar.gz를 찾아봄
+        try:
+            weights_path = next(MODEL_PATH.glob("*.tar.gz"))
+        except StopIteration:
+            raise FileNotFoundError(f"모델 가중치 파일(.ckpt or .tar.gz)을 찾을 수 없습니다: {MODEL_PATH}")
 
-    # 2. 체크포인트 로드 (압축 파일 가능성 처리)
+    # 2. 파일 타입 확인 및 스트림 준비
     try:
-        # 일반 파일로 로드 시도
-        checkpoint = torch.load(weights_path, map_location=device, weights_only=False)
-    except Exception as e:
-        # 오류 발생 시, gzip 압축 파일인지 확인하고 재시도
-        if "invalid load key" in str(e): # gzipped file signature
-            print("Warning: Checkpoint file appears to be compressed. Decompressing on the fly.")
-            import gzip
-            with gzip.open(weights_path, 'rb') as f:
-                checkpoint = torch.load(f, map_location=device, weights_only=False)
-        else:
-            # 다른 종류의 오류는 다시 발생시킴
-            raise e
+        with open(weights_path, 'rb') as f:
+            header = f.read(4)
+            f.seek(0) # 포인터 원위치
+            
+            if header.startswith(b'\x1f\x8b\x08'): # Gzip 매직 넘버
+                print("Info: Checkpoint is a Gzip compressed file.")
+                data_stream = gzip.open(weights_path, 'rb')
+            elif tarfile.is_tarfile(weights_path):
+                print("Info: Checkpoint is a TAR archive. Extracting in memory.")
+                with tarfile.open(fileobj=f) as tar:
+                    # tar 아카이브 내의 첫 번째 파일을 사용한다고 가정
+                    member_name = tar.getnames()[0]
+                    print(f"Info: Using member '{member_name}' from TAR archive.")
+                    extracted_file = tar.extractfile(member_name)
+                    data_stream = extracted_file
+            else:
+                # 일반 파일
+                print("Info: Checkpoint is a regular file.")
+                data_stream = f
+            
+            # 3. sys.modules 패치 및 로드
+            sys.modules['odelia.models.mst'] = mst_module
+            sys.modules['odelia.models.base_model'] = base_model_module
+            
+            checkpoint = torch.load(data_stream, map_location=device, weights_only=False)
 
-    # 3. sys.modules를 임시로 패치하여 경로 문제 해결
-    sys.modules['odelia.models.mst'] = mst_module
-    sys.modules['odelia.models.base_model'] = base_model_module
-    
-    # 4. 임시 패치 정리 (이 부분은 체크포인트 로드 후에 와야 함)
-    # 체크포인트 로드 자체는 클래스 정의가 필요 없지만, 하이퍼파라미터로 모델을 만들 때 필요.
-    # 하지만 클래스 객체는 이미 checkpoint에 unpickle되므로, 이 패치는 사실상 state_dict 로드 전에만 유효하면 됨.
-    # 순서를 유지하는 것이 안전함.
+    finally:
+        # finally 블록을 사용하여 스트림이 열려있으면 닫아줌
+        if 'data_stream' in locals() and hasattr(data_stream, 'close'):
+            data_stream.close()
 
+    # 4. 모델 재구성 및 가중치 로드
     hyper_parameters = checkpoint['hyper_parameters']
-    
     if 'loss_kwargs' not in hyper_parameters:
         hyper_parameters['loss_kwargs'] = {'class_labels_num': 2}
         
     model = MST(**hyper_parameters)
 
-    # 이제 패치를 정리해도 안전
-    del sys.modules['odelia.models.mst']
-    del sys.modules['odelia.models.base_model']
+    # 패치 정리
+    if 'odelia.models.mst' in sys.modules:
+        del sys.modules['odelia.models.mst']
+    if 'odelia.models.base_model' in sys.modules:
+        del sys.modules['odelia.models.base_model']
     
     state_dict = checkpoint['state_dict']
     state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
