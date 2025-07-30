@@ -11,8 +11,10 @@ import torch.nn.functional as F
 from einops import rearrange
 import torchio as tio
 import re
-import pickle
-import io
+import sys
+from resources.odelia.models.mst import MST
+import resources.odelia.models.mst as mst_module
+import resources.odelia.models.base_model as base_model_module
 
 # 경로 설정
 INPUT_PATH = Path("/input")
@@ -20,51 +22,45 @@ OUTPUT_PATH = Path("/output")
 MODEL_PATH = Path("/opt/ml/model")
 TEMP_PATH = Path("/tmp")  # 임시 파일 저장 경로
 
-class SafeUnpickler(pickle.Unpickler):
-    """체크포인트 로딩 시 모듈 경로 문제를 해결하는 안전한 언피클러"""
-    def find_class(self, module, name):
-        # odelia 모듈 참조를 현재 모듈로 리다이렉트
-        if module.startswith('odelia.'):
-            # odelia 모듈 참조를 무시하고 기본 클래스 사용
-            if name in ['MST', '_MST', 'BasicRegression']:
-                return getattr(__import__('resources.odelia.models.mst', fromlist=[name]), name)
-        return super().find_class(module, name)
-
-def safe_torch_load(file_path, map_location=None):
-    """안전한 torch.load 함수"""
-    try:
-        # 먼저 weights_only로 시도
-        return torch.load(file_path, map_location=map_location, weights_only=True)
-    except:
-        try:
-            # 안전한 언피클링 사용
-            with open(file_path, 'rb') as f:
-                unpickler = SafeUnpickler(f)
-                checkpoint = unpickler.load()
-            return checkpoint
-        except:
-            # 마지막 수단: 일반 로딩
-            return torch.load(file_path, map_location=map_location)
-
 def load_model():
-    """모델과 가중치 로드"""
+    """모델과 가중치 로드 (경로 문제 해결 포함)"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = MST(in_ch=1, out_ch=2, loss_kwargs={'class_labels_num': 2}).to(device)
     
-    # 가중치 로드
-    weights_path = MODEL_PATH / "epoch=23-step=624.ckpt"
-    if not weights_path.exists():
-        raise FileNotFoundError(f"모델 가중치 파일을 찾을 수 없습니다: {weights_path}")
+    # 1. /opt/ml/model/ 에서 .ckpt 파일을 동적으로 찾기
+    try:
+        weights_path = next(MODEL_PATH.glob("*.ckpt"))
+    except StopIteration:
+        raise FileNotFoundError(f"모델 가중치 파일(.ckpt)을 찾을 수 없습니다: {MODEL_PATH}")
+
+    # 2. sys.modules를 임시로 패치하여 경로 문제 해결
+    #    'odelia.models'라는 과거 경로를 현재의 'resources.odelia.models'로 매핑
+    sys.modules['odelia.models.mst'] = mst_module
+    sys.modules['odelia.models.base_model'] = base_model_module
+    
+    # 3. 체크포인트 로드 (weights_only=False로 전체 로드)
+    #    Lightning 체크포인트는 가중치 외에 하이퍼파라미터 등 중요 정보를 포함
+    checkpoint = torch.load(weights_path, map_location=device, weights_only=False)
+    
+    # 4. 임시 패치 정리
+    del sys.modules['odelia.models.mst']
+    del sys.modules['odelia.models.base_model']
+
+    # 5. 체크포인트에서 하이퍼파라미터를 가져와 모델 재구성
+    hyper_parameters = checkpoint['hyper_parameters']
+    
+    # 오래된 체크포인트와의 호환성을 위해 loss_kwargs 추가
+    if 'loss_kwargs' not in hyper_parameters:
+        hyper_parameters['loss_kwargs'] = {'class_labels_num': 2}
         
-    # 안전한 체크포인트 로딩 (모듈 경로 문제 해결)
-    checkpoint = safe_torch_load(weights_path, map_location=device)
+    model = MST(**hyper_parameters)
     
-    # state_dict 키 정리 (Lightning 형식 대응)
-    state_dict = checkpoint.get('state_dict', checkpoint)
-    model_state_dict = {k.replace('model.', '').replace('mst.', ''): v for k, v in state_dict.items()}
+    # 6. 모델 가중치(state_dict) 로드
+    state_dict = checkpoint['state_dict']
+    # 'model.' 접두사 제거 (Lightning -> 일반 PyTorch)
+    state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
+    model.load_state_dict(state_dict, strict=True)
     
-    model.load_state_dict(model_state_dict, strict=False)
-    
+    model.to(device)
     model.eval()
     return model, device
 
@@ -146,7 +142,7 @@ def preprocess_image(image_array):
     return image_tensor
 
 # 우리의 MST 모델 코드 import
-from resources.odelia.models.mst import MST
+# from resources.odelia.models.mst import MST # This line is now redundant as MST is imported directly
 
 def run():
     """메인 추론 함수"""

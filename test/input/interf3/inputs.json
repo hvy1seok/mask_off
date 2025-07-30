@@ -1,0 +1,100 @@
+[
+    {
+        "file": null,
+        "image": {
+            "name": "the_original_filename_of_the_file_that_was_uploaded.suffix"
+        },
+        "value": null,
+        "interface": {
+            "slug": "dce-breast-mri-timepoint-1",
+            "kind": "Image",
+            "super_kind": "Image",
+            "relative_path": "images/dce-breast-mri-1",
+            "example_value": null
+        }
+    },
+    {
+        "file": null,
+        "image": {
+            "name": "the_original_filename_of_the_file_that_was_uploaded.suffix"
+        },
+        "value": null,
+        "interface": {
+            "slug": "dce-breast-mri-timepoint-2",
+            "kind": "Image",
+            "super_kind": "Image",
+            "relative_path": "images/dce-breast-mri-2",
+            "example_value": null
+        }
+    },
+    {
+        "file": null,
+        "image": {
+            "name": "the_original_filename_of_the_file_that_was_uploaded.suffix"
+        },
+        "value": null,
+        "interface": {
+            "slug": "t2-breast-mri",
+            "kind": "Image",
+            "super_kind": "Image",
+            "relative_path": "images/t2-breast-mri",
+            "example_value": null
+        }
+    },
+    {
+        "file": null,
+        "image": {
+            "name": "the_original_filename_of_the_file_that_was_uploaded.suffix"
+        },
+        "value": null,
+        "interface": {
+            "slug": "dce-breast-mri-timepoint-0",
+            "kind": "Image",
+            "super_kind": "Image",
+            "relative_path": "images/dce-breast-mri-0",
+            "example_value": null
+        }
+    },
+    {
+        "file": null,
+        "image": {
+            "name": "the_original_filename_of_the_file_that_was_uploaded.suffix"
+        },
+        "value": null,
+        "interface": {
+            "slug": "dce-breast-mri-timepoint-3",
+            "kind": "Image",
+            "super_kind": "Image",
+            "relative_path": "images/dce-breast-mri-3",
+            "example_value": null
+        }
+    },
+    {
+        "file": null,
+        "image": {
+            "name": "the_original_filename_of_the_file_that_was_uploaded.suffix"
+        },
+        "value": null,
+        "interface": {
+            "slug": "dce-breast-mri-timepoint-4",
+            "kind": "Image",
+            "super_kind": "Image",
+            "relative_path": "images/dce-breast-mri-4",
+            "example_value": null
+        }
+    },
+    {
+        "file": null,
+        "image": {
+            "name": "the_original_filename_of_the_file_that_was_uploaded.suffix"
+        },
+        "value": null,
+        "interface": {
+            "slug": "dce-breast-mri-timepoint-5",
+            "kind": "Image",
+            "super_kind": "Image",
+            "relative_path": "images/dce-breast-mri-5",
+            "example_value": null
+        }
+    }
+]

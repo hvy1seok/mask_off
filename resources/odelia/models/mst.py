@@ -7,7 +7,7 @@ from torch.utils.checkpoint import checkpoint
 import torch.nn.functional as F
 import timm
 
-from .base_model import BasicClassifier, BasicRegression
+from .base_model import BasicRegression
 
 def _get_resnet_torch(model):
     return {
@@ -30,12 +30,18 @@ class TransformerFusion(nn.Module):
         )
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
         
-    def forward(self, x):
+    def forward(self, x, attention_mask=None):
         B = x.shape[0]
         cls_tokens = self.cls_token.expand(B, -1, -1)
         x = torch.cat([x, cls_tokens], dim=1)
-        x = self.transformer(x)
-        return x[:, -1]  # CLS 토큰 출력 사용
+
+        if attention_mask is not None:
+            # Add a True for the CLS token
+            cls_mask = torch.ones((B, 1), dtype=torch.bool, device=x.device)
+            attention_mask = torch.cat([attention_mask, cls_mask], dim=1)
+        
+        x = self.transformer(x, src_key_padding_mask=~attention_mask if attention_mask is not None else None)
+        return x[:, -1]
 
 class LinearFusion(nn.Module):
     def __init__(self, dim):
@@ -78,9 +84,10 @@ class _MST(nn.Module):
             emb_ch = self.backbone.fc.in_features
             self.backbone.fc = nn.Identity()
         elif backbone_type == "dinov2":
+            # For offline compatibility in submission environment, use timm instead of torch.hub
             full_model_size = dinov2_model_size_map.get(model_size, model_size)
-            model_name = f'vit_{full_model_size}_patch14_dinov2'
-            # torch.hub.load 대신 timm.create_model 사용 (오프라인 호환)
+            model_name = f'vit_{full_model_size}_patch14_dinov2.lvd142m'
+            
             self.backbone = timm.create_model(model_name, pretrained=False)
             self.backbone.mask_token = None
             emb_ch = self.backbone.embed_dim
@@ -97,29 +104,29 @@ class _MST(nn.Module):
         # 단일 linear layer로 변경
         self.linear = nn.Linear(emb_ch, out_ch)
 
-    def forward(self, x):
+    def forward(self, x, attention_mask=None):
         B, P, C, D, H, W = x.shape
         
-        # [B, P, C, D, H, W] -> [B*P*D, C, H, W]
         x = rearrange(x, 'b p c d h w -> (b p d) c h w')
         
-        # [B*P*D, C, H, W] -> [B*P*D, 3, H, W]
         if x.shape[1] == 1:
-            x = x.repeat(1, 3, 1, 1)  # grayscale to RGB
+            x = x.repeat(1, 3, 1, 1)
 
-        # [B*P*D, 3, H, W] -> [B*P*D, E]
         x = self.backbone(x)
         
-        # [B*P*D, E] -> [B, P*D, E]
-        x = rearrange(x, '(b p d) e -> b (p d) e', b=B, p=P)
+        x = rearrange(x, '(b p d) e -> b (p d) e', b=B, p=P, d=D)
         
-        # [B, P*D, E] -> [B, E]
+        if attention_mask is not None:
+            # The mask from collate_fn is for P. We need to expand it for the D dimension.
+            attention_mask = attention_mask.repeat_interleave(D, dim=1)
+
         if self.slice_fusion is not None:
-            x = self.slice_fusion(x)
+            if self.slice_fusion_type == "transformer":
+                x = self.slice_fusion(x, attention_mask=attention_mask)
+            else:
+                x = x.mean(dim=1) # Non-transformer fusions don't use mask for now
         
-        # [B, E] -> [B, 1]
         x = self.linear(x)
-        
         return x
     
 
@@ -142,9 +149,11 @@ class MST(BasicRegression):
     def forward(self, batch):
         if isinstance(batch, dict):
             x = batch['source']
+            attention_mask = batch.get('attention_mask')
         else:
             x = batch
-        return self.mst(x)
+            attention_mask = None
+        return self.mst(x, attention_mask=attention_mask)
 
     def _step(self, batch: dict, batch_idx: int, state: str, step: int):
         """MST를 위한 커스텀 _step 메서드"""
