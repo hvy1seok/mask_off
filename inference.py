@@ -17,6 +17,8 @@ import resources.odelia.models.mst as mst_module
 import resources.odelia.models.base_model as base_model_module
 import tarfile
 import gzip
+import io
+import pickle
 
 # 경로 설정
 INPUT_PATH = Path("/input")
@@ -25,51 +27,57 @@ MODEL_PATH = Path("/opt/ml/model")
 TEMP_PATH = Path("/tmp")  # 임시 파일 저장 경로
 
 def load_model():
-    """모델과 가중치 로드 (경로, 압축, tar 아카이브 문제 해결 포함)"""
+    """모델과 가중치 로드 (모든 파일 형식 자동 감지)"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # 1. /opt/ml/model/ 에서 .ckpt 파일을 동적으로 찾기
+    # 1. 모델 가중치 파일 경로 찾기 (확장자 무관)
     try:
-        weights_path = next(MODEL_PATH.glob("*.ckpt"))
+        weights_path = next(MODEL_PATH.glob("*"))
     except StopIteration:
-        # .ckpt가 없으면 .tar.gz를 찾아봄
-        try:
-            weights_path = next(MODEL_PATH.glob("*.tar.gz"))
-        except StopIteration:
-            raise FileNotFoundError(f"모델 가중치 파일(.ckpt or .tar.gz)을 찾을 수 없습니다: {MODEL_PATH}")
+        raise FileNotFoundError(f"모델 가중치 파일을 찾을 수 없습니다: {MODEL_PATH}")
 
-    # 2. 파일 타입 확인 및 스트림 준비
+    # 2. sys.modules 패치 (로드 전에 한 번만 수행)
+    sys.modules['odelia.models.mst'] = mst_module
+    sys.modules['odelia.models.base_model'] = base_model_module
+
+    checkpoint = None
+    
+    # 3. 파일 타입에 따라 체크포인트 로드 (순차적 시도)
     try:
-        with open(weights_path, 'rb') as f:
-            header = f.read(4)
-            f.seek(0) # 포인터 원위치
-            
-            if header.startswith(b'\x1f\x8b\x08'): # Gzip 매직 넘버
-                print("Info: Checkpoint is a Gzip compressed file.")
-                data_stream = gzip.open(weights_path, 'rb')
-            elif tarfile.is_tarfile(weights_path):
-                print("Info: Checkpoint is a TAR archive. Extracting in memory.")
-                with tarfile.open(fileobj=f) as tar:
-                    # tar 아카이브 내의 첫 번째 파일을 사용한다고 가정
-                    member_name = tar.getnames()[0]
-                    print(f"Info: Using member '{member_name}' from TAR archive.")
-                    extracted_file = tar.extractfile(member_name)
-                    data_stream = extracted_file
-            else:
-                # 일반 파일
-                print("Info: Checkpoint is a regular file.")
-                data_stream = f
-            
-            # 3. sys.modules 패치 및 로드
-            sys.modules['odelia.models.mst'] = mst_module
-            sys.modules['odelia.models.base_model'] = base_model_module
-            
-            checkpoint = torch.load(data_stream, map_location=device, weights_only=False)
+        # 시도 1: TAR 아카이브 (.tar, .tar.gz 등)
+        print("Info: Attempting to load as a TAR archive...")
+        with tarfile.open(weights_path, 'r:*') as tar:
+            member_name = tar.getnames()[0]
+            print(f"Info: Found member '{member_name}', extracting to memory.")
+            extracted_file = tar.extractfile(member_name)
+            if extracted_file:
+                # torch.load는 seek 가능한 파일 객체가 필요하므로 메모리 버퍼 사용
+                with io.BytesIO(extracted_file.read()) as f:
+                    checkpoint = torch.load(f, map_location=device, weights_only=False)
+        print("Info: Successfully loaded from TAR archive.")
+    except tarfile.TarError:
+        print("Info: Not a TAR archive. Trying other formats.")
+        # TAR가 아니면 다른 형식 시도
+        try:
+            # 시도 2: Gzip 압축 파일 (순수 gzip)
+            print("Info: Attempting to load as a Gzip file...")
+            with gzip.open(weights_path, 'rb') as f:
+                checkpoint = torch.load(f, map_location=device, weights_only=False)
+            print("Info: Successfully loaded from Gzip file.")
+        except (gzip.BadGzipFile, EOFError, pickle.UnpicklingError):
+            print("Info: Not a Gzip file. Trying as a plain file.")
+            # 시도 3: 일반 파일
+            try:
+                print("Info: Attempting to load as a plain file...")
+                with open(weights_path, 'rb') as f:
+                    checkpoint = torch.load(f, map_location=device, weights_only=False)
+                print("Info: Successfully loaded as a plain file.")
+            except Exception as e:
+                print(f"Error: All attempts to load the model failed.")
+                raise e
 
-    finally:
-        # finally 블록을 사용하여 스트림이 열려있으면 닫아줌
-        if 'data_stream' in locals() and hasattr(data_stream, 'close'):
-            data_stream.close()
+    if checkpoint is None:
+        raise IOError(f"Could not load checkpoint file: {weights_path}")
 
     # 4. 모델 재구성 및 가중치 로드
     hyper_parameters = checkpoint['hyper_parameters']
@@ -77,7 +85,7 @@ def load_model():
         hyper_parameters['loss_kwargs'] = {'class_labels_num': 2}
         
     model = MST(**hyper_parameters)
-
+    
     # 패치 정리
     if 'odelia.models.mst' in sys.modules:
         del sys.modules['odelia.models.mst']
